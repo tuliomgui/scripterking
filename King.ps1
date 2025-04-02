@@ -1,19 +1,30 @@
 Write-Host "Searching for files..." -ForegroundColor Green
 
-enum States {
+# Ensure HashSet is available
+Add-Type -TypeDefinition @"
+using System.Collections.Generic;
+"@
+
+enum TableSearchStates {
     Searching
     FKFound
     ReferenceFound
     TableFound
 }
 
-$global:CurrentState = [States]::Searching
+enum OutputFileState {
+    DropCreateInsert
+    WaitingSeparator
+    Dependencies
+}
+
+$global:CurrentState = [TableSearchStates]::Searching
 $global:AllTables = [System.Collections.ArrayList]::new()
 $global:ReferencedTablesList = [System.Collections.ArrayList]::new()
 $global:TablesMap = [System.Collections.Hashtable]::new()
 $global:TableReferencedByMap = [System.Collections.Hashtable]::new()
 
-function GetSqlFiles {
+function GetTableSqlFiles {
     return Get-ChildItem -Path "." -Recurse -File -Filter "*Table.sql" -ErrorAction SilentlyContinue
 }
 
@@ -23,7 +34,7 @@ function SearchForeignKey {
     )
     if ($CurrentLine -match 'FOREIGN KEY') {
         # Write-Host "[FK] Line content: $CurrentLine"
-        $global:CurrentState = [States]::FKFound
+        $global:CurrentState = [TableSearchStates]::FKFound
     }
 }
 
@@ -33,7 +44,7 @@ function SearchReference {
     )
     if ($CurrentLine -match 'REFERENCES') {
         # Write-Host "[REF] Line content: $CurrentLine"
-        $global:CurrentState = [States]::ReferenceFound
+        $global:CurrentState = [TableSearchStates]::ReferenceFound
     }
 }
 
@@ -43,24 +54,11 @@ function ExtractReferencedTable {
     )
     if ($CurrentLine -match 'REFERENCES\s+\[?\w+\]?\.\[?(\w+)\]') {
         $ReferencedTable = $matches[1]
-        $global:CurrentState = [States]::TableFound
+        $global:CurrentState = [TableSearchStates]::TableFound
         return $ReferencedTable
     }
     return $null
 }
-
-# function OrganizeTableOrder {
-#     param (
-#         [Parameter(Mandatory=$true)][string]$CurrentTableName,    
-#         [Parameter(Mandatory=$true)][string]$ReferencedTableName,
-#         [Parameter(Mandatory=$false)][System.Collections.ArrayList]$ReferencedTablesList
-#     )
-#     AddTableReferenceControl -CurrentTableName $CurrentTableName -ReferencedTableName $ReferencedTableName
-#     Write-Host "[ORG] Current Table: $CurrentTableName, Referenced Table: $ReferencedTableName"
-#     $TableReferenceLevel = GetTableReferenceLevel -Level 0 -TableName $ReferencedTableName
-#     Write-Host "[ORG] Referenced Table Level is $TableReferenceLevel"
-#     $ReferencedTablesList.Add($ReferencedTableName) | Out-Null
-# }
 
 function AddTableReferenceControl {
     param (
@@ -71,27 +69,23 @@ function AddTableReferenceControl {
     if (-not ($global:AllTables -contains $CurrentTableName)) {
         $global:AllTables.Add($CurrentTableName) | Out-Null
     }
-    if ([string]::IsNullOrWhiteSpace($Line)) {
+    if ([string]::IsNullOrWhiteSpace($ReferencedTableName)) {
         return
     }
     # Add control of the table reference
     if ($global:TablesMap.ContainsKey($CurrentTableName)) {
-        if (-not ($global:TablesMap[$CurrentTableName] -contains $ReferencedTableName)) {
-            $global:TablesMap[$CurrentTableName].Add($ReferencedTableName) | Out-Null
-        }
+        $global:TablesMap[$CurrentTableName].Add($ReferencedTableName) | Out-Null
     }
     else {
-        $global:TablesMap.Add($CurrentTableName, [System.Collections.ArrayList]::new())
+        $global:TablesMap.Add($CurrentTableName, [System.Collections.Generic.HashSet[string]]::new())
         $global:TablesMap[$CurrentTableName].Add($ReferencedTableName) | Out-Null
     }
     # Add control of the referenced by tables
     if ($global:TableReferencedByMap.ContainsKey($ReferencedTableName)) {
-        if (-not ($global:TableReferencedByMap[$ReferencedTableName] -contains $CurrentTableName)) {
-            $global:TableReferencedByMap[$ReferencedTableName].Add($CurrentTableName) | Out-Null
-        }
+        $global:TableReferencedByMap[$ReferencedTableName].Add($CurrentTableName) | Out-Null
     }
     else {
-        $global:TableReferencedByMap.Add($ReferencedTableName, [System.Collections.ArrayList]::new())
+        $global:TableReferencedByMap.Add($ReferencedTableName, [System.Collections.Generic.HashSet[string]]::new())
         $global:TableReferencedByMap[$ReferencedTableName].Add($CurrentTableName) | Out-Null
     }
 }
@@ -142,6 +136,48 @@ function GetTableNameFromFileName {
     exit 101
 }
 
+function ProcessTableReferenceState {
+    param (
+        [Parameter(Mandatory = $true)][string]$Line
+    )
+    $ReferencedTable = $null
+    if ([string]::IsNullOrWhiteSpace($Line)) {
+        continue
+    }
+    if ($global:CurrentState -eq [TableSearchStates]::Searching) {
+        SearchForeignKey -CurrentLine $Line
+    }
+    if ($global:CurrentState -eq [TableSearchStates]::FKFound) {
+        SearchReference -CurrentLine $Line
+    }
+    if ($global:CurrentState -eq [TableSearchStates]::ReferenceFound) {
+        $ReferencedTable = ExtractReferencedTable -CurrentLine $Line
+    }
+    if ($global:CurrentState -eq [TableSearchStates]::TableFound) {
+        if ($null -eq $ReferencedTable) {
+            Write-Host "Referenced table is null. Exiting." -ForegroundColor Red
+            exit 100
+        }
+        AddTableReferenceControl -CurrentTableName $CurrentTableName -ReferencedTableName $ReferencedTable
+        $global:CurrentState = [TableSearchStates]::Searching
+    }
+}
+
+function ProcessOutputFileState {
+    param (
+        [Parameter(Mandatory = $true)][string]$Line
+    )
+    if ($Line -match '') {
+        $global:CurrentState = [OutputFileState]::DropCreateInsert
+    }
+    elseif ($Line -match 'CREATE TABLE') {
+        $global:CurrentState = [OutputFileState]::WaitingSeparator
+    }
+    elseif ($Line -match 'INSERT INTO') {
+        $global:CurrentState = [OutputFileState]::Dependencies
+    }
+}
+
 function GetTablesOrderedList {
     param (
         [Parameter(Mandatory = $true)][System.Collections.ArrayList]$FileList
@@ -157,28 +193,11 @@ function GetTablesOrderedList {
             $FoundReferece = $false
             # Write-Host "Processing file for: $CurrentTableName"
             foreach ($Line in $Content) {
-                $ReferencedTable = $null
-                if ([string]::IsNullOrWhiteSpace($Line)) {
-                    continue
-                }
-                if ($global:CurrentState -eq [States]::Searching) {
-                    SearchForeignKey -CurrentLine $Line
-                }
-                if ($global:CurrentState -eq [States]::FKFound) {
-                    SearchReference -CurrentLine $Line
-                }
-                if ($global:CurrentState -eq [States]::ReferenceFound) {
-                    $ReferencedTable = ExtractReferencedTable -CurrentLine $Line
+                ProcessTableReferenceState -Line $Line
+                if (-not $FoundReferece -and $FoundReferece -eq $global:CurrentState -eq [TableSearchStates]::TableFound) {
                     $FoundReferece = $true
                 }
-                if ($global:CurrentState -eq [States]::TableFound) {
-                    if ($null -eq $ReferencedTable) {
-                        Write-Host "Referenced table is null. Exiting." -ForegroundColor Red
-                        exit 100
-                    }
-                    AddTableReferenceControl -CurrentTableName $CurrentTableName -ReferencedTableName $ReferencedTable
-                    $global:CurrentState = [States]::Searching
-                }
+
             }
             if (-not $FoundReferece) {
                 AddTableReferenceControl -CurrentTableName $CurrentTableName
@@ -201,7 +220,7 @@ function PrettyPrintTablesList {
 }
 
 $Time = [Diagnostics.Stopwatch]::StartNew()
-$SqlFiles = GetSqlFiles
+$SqlFiles = GetTableSqlFiles
 GetTablesOrderedList -FileList @($SqlFiles)
 foreach ($Table in $global:AllTables) {
     $CurrentTableLevel = GetTableReferenceLevel -Level 0 -TableName $Table
@@ -210,4 +229,4 @@ foreach ($Table in $global:AllTables) {
 }
 PrettyPrintTablesList
 $Time.Stop()
-Write-Host "Execution Time: $($Time.Elapsed.TotalSeconds) seconds" -ForegroundColor Green
+Write-Host "Execution Time: $([math]::Round($Time.Elapsed.TotalSeconds, 2)) seconds" -ForegroundColor Green
