@@ -1,5 +1,3 @@
-Write-Host "Searching for files..." -ForegroundColor Green
-
 # Ensure HashSet is available
 Add-Type -TypeDefinition @"
 using System.Collections.Generic;
@@ -21,6 +19,7 @@ enum OutputFileState {
 
 $global:DCIPath = "DCI"
 $global:RefsPath = "Refs"
+$global:HasDatabase = $false
 
 $global:ExecutionOrder = @("Schema", $global:DCIPath, $global:RefsPath, "View", "UserDefinedFunction", "StoredProcedure", "Users")
 
@@ -192,6 +191,10 @@ function ProcessOutputFileState {
         Add-Content -Path $OutputFile -Value $Line
     } else {
         $OutputFile = "$($global:RefsPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:RefsPath).sql"
+        if (-not ($global:HasDatabase)) {
+            $global:HasDatabase = $true
+            $Line = "USE [SIMA]`r`nGO`r`n$($Line)"
+        }
         Add-Content -Path $OutputFile -Value $Line
     }
 }
@@ -199,6 +202,7 @@ function ProcessOutputFileState {
 function ResetStates {
     $global:CurrentState = [TableSearchStates]::Searching
     $global:OutputState = [OutputFileState]::DropCreateInsert
+    $global:HasDatabase = $false
 }
 
 function GenerateTablesOrderedList {
@@ -209,13 +213,13 @@ function GenerateTablesOrderedList {
         Write-Host "No files found."
     }
     else {
-        Write-Host "Found $($FileList.Count) files."
+        # Write-Host "Found $($FileList.Count) files."
         foreach ($file in $FileList) {
             ResetStates
             $Content = Get-Content -Path $file
             $CurrentTableName = GetTableNameFromFileName -FileName $(Get-Item $file).Name
             $FoundReferece = $false
-            Write-Host "Processing file for: $CurrentTableName"
+            # Write-Host "Processing file for: $CurrentTableName"
             foreach ($Line in $Content) {
                 if ([string]::IsNullOrWhiteSpace($Line)) {
                     continue
@@ -229,6 +233,52 @@ function GenerateTablesOrderedList {
             if (-not $FoundReferece) {
                 AddTableReferenceControl -CurrentTableName $CurrentTableName
             }
+        }
+    }
+}
+
+function RunSQLFile {
+    param (
+        [Parameter(Mandatory=$true)][string]$Type,
+        [Parameter(Mandatory=$true)][string]$File
+    )
+    $hostname = "127.0.0.1"
+    $port = "1444"
+    $login = "tulio"
+    $pass = "12345678"
+    Write-Host "Arquivo: $File"
+    sqlcmd -S "$hostname,$port" -U $login -P $pass -i "$File" >> "$($Type)$([System.IO.Path]::DirectorySeparatorChar)${Type}_queries.log"
+    # if ([string]::IsNullOrEmpty($login)) {
+    #     sqlcmd -S $hostname,$port -E -i "$File" >> "${Type}_queries.log"
+    # } else {
+    #     sqlcmd -S $hostname,$port -U $login -P $pass -i "$File" >> "${Type}_queries.log"
+    # }
+}
+
+function ExecuteScripts {
+    foreach ($Type in $global:ExecutionOrder) {
+        if ($Type -eq $global:DCIPath) {
+            foreach ($Tables in $global:ReferencedTablesList) {
+                foreach ($Table in $Tables) {
+                    $File = ".$([System.IO.Path]::DirectorySeparatorChar)$($global:DCIPath)$([System.IO.Path]::DirectorySeparatorChar)$($Table).$($global:DCIPath).sql"
+                    RunSQLFile -Type $Type -File $File
+                }
+            }
+            continue
+        }
+        if ($Type -eq $global:RefsPath) {
+            foreach ($Tables in $global:ReferencedTablesList.Reverse()) {
+                foreach ($Table in $Tables) {
+                    $File = ".$([System.IO.Path]::DirectorySeparatorChar)$($global:RefsPath)$([System.IO.Path]::DirectorySeparatorChar)$($Table).$($global:RefsPath).sql"
+                    RunSQLFile -Type $Type -File $File
+                }
+            }
+            continue
+        }
+        $Files = Get-ChildItem -Path $Type -File -Filter "*.$($Type).sql"
+        foreach ($File in $Files) {
+            $TableName = GetTableNameFromFileName -FileName $(Get-Item $File).Name
+            RunSQLFile -Type $Type -TableName $TableName
         }
     }
 }
@@ -261,7 +311,7 @@ function MoveFilesToFolders {
     param (
         [Parameter(Mandatory = $true)][string]$Filter
     )
-    $Files = Get-ChildItem -Path "." -File -Filter ".$($Filter).sql"
+    $Files = Get-ChildItem -Path "." -File -Filter "*.$($Filter).sql"
     foreach ($File in $Files) {
         $DestinationPath = "$($Filter)$([System.IO.Path]::DirectorySeparatorChar)"
         Move-Item -Path $File -Destination $DestinationPath
@@ -276,14 +326,19 @@ function GenerateTablesLevels {
     }
 }
 
-
-foreach ($Type in $global:ExecutionOrder) {
-    CreateFolderOrCleanIt -Path $Type
+function CreateAllFoldersAndMoveFiles {
+    foreach ($Type in $global:ExecutionOrder) {
+        CreateFolderOrCleanIt -Path $Type
+        MoveFilesToFolders -Filter $Type
+    }
 }
 
+Write-Host "Running..." -ForegroundColor Green
+CreateAllFoldersAndMoveFiles
 $Time = [Diagnostics.Stopwatch]::StartNew()
 GenerateTablesOrderedList -FileList @(GetTableSqlFiles)
 GenerateTablesLevels
 PrettyPrintTablesList
 $Time.Stop()
 Write-Host "Execution Time: $([math]::Round($Time.Elapsed.TotalSeconds, 2)) seconds" -ForegroundColor Green
+ExecuteScripts
