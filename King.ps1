@@ -15,10 +15,17 @@ enum TableSearchStates {
 enum OutputFileState {
     DropCreateInsert
     WaitingSeparator
+    SeparatorFound
     Dependencies
 }
 
+$global:DCIPath = "DCI"
+$global:RefsPath = "Refs"
+
+$global:ExecutionOrder = @("Schema", $global:DCIPath, $global:RefsPath, "View", "UserDefinedFunction", "StoredProcedure", "Users")
+
 $global:CurrentState = [TableSearchStates]::Searching
+$global:OutputState = [OutputFileState]::DropCreateInsert
 $global:AllTables = [System.Collections.ArrayList]::new()
 $global:ReferencedTablesList = [System.Collections.ArrayList]::new()
 $global:TablesMap = [System.Collections.Hashtable]::new()
@@ -162,17 +169,39 @@ function ProcessTableReferenceState {
 
 function ProcessOutputFileState {
     param (
-        [Parameter(Mandatory = $true)][string]$Line
+        [Parameter(Mandatory = $true)][string]$Line,
+        [Parameter(Mandatory = $true)][string]$TableName
     )
-    if ($Line -match 'SET IDENTITY_INSERT [dbo].[User] OFF') {
-        $global:CurrentState = [OutputFileState]::WaitingSeparator
+    if ($global:OutputState -eq [OutputFileState]::DropCreateInsert) {
+        if ($Line -match 'SET IDENTITY_INSERT \[.*?\]\.\[.*?\] OFF') {
+            $global:OutputState = [OutputFileState]::WaitingSeparator
+        }
     }
-    if ($Line -match 'INSERT INTO') {
-        $global:CurrentState = [OutputFileState]::Dependencies
+    if ($global:OutputState -eq [OutputFileState]::WaitingSeparator) {
+        if ($Line -match 'GO') {
+            $global:OutputState = [OutputFileState]::SeparatorFound
+        }
+    }
+    if ($global:OutputState -eq [OutputFileState]::SeparatorFound) {
+        if (-not ($Line -match 'GO')) {
+            $global:OutputState = [OutputFileState]::Dependencies
+        }
+    }
+    if ($global:OutputState -ne [OutputFileState]::Dependencies) {
+        $OutputFile = "$($global:DCIPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:DCIPath).sql"
+        Add-Content -Path $OutputFile -Value $Line
+    } else {
+        $OutputFile = "$($global:RefsPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:RefsPath).sql"
+        Add-Content -Path $OutputFile -Value $Line
     }
 }
 
-function GetTablesOrderedList {
+function ResetStates {
+    $global:CurrentState = [TableSearchStates]::Searching
+    $global:OutputState = [OutputFileState]::DropCreateInsert
+}
+
+function GenerateTablesOrderedList {
     param (
         [Parameter(Mandatory = $true)][System.Collections.ArrayList]$FileList
     )
@@ -182,7 +211,7 @@ function GetTablesOrderedList {
     else {
         Write-Host "Found $($FileList.Count) files."
         foreach ($file in $FileList) {
-            $global:CurrentState = [TableSearchStates]::Searching
+            ResetStates
             $Content = Get-Content -Path $file
             $CurrentTableName = GetTableNameFromFileName -FileName $(Get-Item $file).Name
             $FoundReferece = $false
@@ -195,7 +224,7 @@ function GetTablesOrderedList {
                 if ((-not ($FoundReferece)) -and ($global:CurrentState -eq [TableSearchStates]::TableFound)) {
                     $FoundReferece = $true
                 }
-                ProcessOutputFileState -Line $Line
+                ProcessOutputFileState -Line $Line -TableName $CurrentTableName
             }
             if (-not $FoundReferece) {
                 AddTableReferenceControl -CurrentTableName $CurrentTableName
@@ -217,14 +246,44 @@ function PrettyPrintTablesList {
     }
 }
 
-$Time = [Diagnostics.Stopwatch]::StartNew()
-$SqlFiles = GetTableSqlFiles
-GetTablesOrderedList -FileList @($SqlFiles)
-foreach ($Table in $global:AllTables) {
-    $CurrentTableLevel = GetTableReferenceLevel -Level 0 -TableName $Table
-    # Write-Host "Table: $Table, Level: $CurrentTableLevel"
-    AddReferenceOnLevel -TableName $Table -Level $CurrentTableLevel
+function CreateFolderOrCleanIt {
+    param (
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+    if (-not (Test-Path -Path $Path)) {
+        New-Item -ItemType Directory -Path $Path | Out-Null
+    } else{
+        Get-ChildItem -Path $Path -Recurse | Remove-Item -Force -Recurse
+    }
 }
+
+function MoveFilesToFolders {
+    param (
+        [Parameter(Mandatory = $true)][string]$Filter
+    )
+    $Files = Get-ChildItem -Path "." -File -Filter ".$($Filter).sql"
+    foreach ($File in $Files) {
+        $DestinationPath = "$($Filter)$([System.IO.Path]::DirectorySeparatorChar)"
+        Move-Item -Path $File -Destination $DestinationPath
+    }
+}
+
+function GenerateTablesLevels {
+    foreach ($Table in $global:AllTables) {
+        $CurrentTableLevel = GetTableReferenceLevel -Level 0 -TableName $Table
+        # Write-Host "Table: $Table, Level: $CurrentTableLevel"
+        AddReferenceOnLevel -TableName $Table -Level $CurrentTableLevel
+    }
+}
+
+
+foreach ($Type in $global:ExecutionOrder) {
+    CreateFolderOrCleanIt -Path $Type
+}
+
+$Time = [Diagnostics.Stopwatch]::StartNew()
+GenerateTablesOrderedList -FileList @(GetTableSqlFiles)
+GenerateTablesLevels
 PrettyPrintTablesList
 $Time.Stop()
 Write-Host "Execution Time: $([math]::Round($Time.Elapsed.TotalSeconds, 2)) seconds" -ForegroundColor Green
