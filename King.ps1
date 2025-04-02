@@ -141,9 +141,6 @@ function ProcessTableReferenceState {
         [Parameter(Mandatory = $true)][string]$Line
     )
     $ReferencedTable = $null
-    if ([string]::IsNullOrWhiteSpace($Line)) {
-        continue
-    }
     if ($global:CurrentState -eq [TableSearchStates]::Searching) {
         SearchForeignKey -CurrentLine $Line
     }
@@ -167,13 +164,10 @@ function ProcessOutputFileState {
     param (
         [Parameter(Mandatory = $true)][string]$Line
     )
-    if ($Line -match '') {
-        $global:CurrentState = [OutputFileState]::DropCreateInsert
-    }
-    elseif ($Line -match 'CREATE TABLE') {
+    if ($Line -match 'SET IDENTITY_INSERT [dbo].[User] OFF') {
         $global:CurrentState = [OutputFileState]::WaitingSeparator
     }
-    elseif ($Line -match 'INSERT INTO') {
+    if ($Line -match 'INSERT INTO') {
         $global:CurrentState = [OutputFileState]::Dependencies
     }
 }
@@ -188,16 +182,20 @@ function GetTablesOrderedList {
     else {
         Write-Host "Found $($FileList.Count) files."
         foreach ($file in $FileList) {
+            $global:CurrentState = [TableSearchStates]::Searching
             $Content = Get-Content -Path $file
             $CurrentTableName = GetTableNameFromFileName -FileName $(Get-Item $file).Name
             $FoundReferece = $false
-            # Write-Host "Processing file for: $CurrentTableName"
+            Write-Host "Processing file for: $CurrentTableName"
             foreach ($Line in $Content) {
+                if ([string]::IsNullOrWhiteSpace($Line)) {
+                    continue
+                }
                 ProcessTableReferenceState -Line $Line
-                if (-not $FoundReferece -and $FoundReferece -eq $global:CurrentState -eq [TableSearchStates]::TableFound) {
+                if ((-not ($FoundReferece)) -and ($global:CurrentState -eq [TableSearchStates]::TableFound)) {
                     $FoundReferece = $true
                 }
-
+                ProcessOutputFileState -Line $Line
             }
             if (-not $FoundReferece) {
                 AddTableReferenceControl -CurrentTableName $CurrentTableName
