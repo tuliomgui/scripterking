@@ -17,9 +17,11 @@ enum OutputFileState {
     Dependencies
 }
 
+$global:OutputWriter = $null
+
 $global:DCIPath = "DCI"
 $global:RefsPath = "Refs"
-$global:HasDatabase = $false
+$global:IsRefsInitiated = $false
 
 $global:ExecutionOrder = @("Schema", $global:DCIPath, $global:RefsPath, "View", "UserDefinedFunction", "StoredProcedure", "Users")
 
@@ -171,38 +173,61 @@ function ProcessOutputFileState {
         [Parameter(Mandatory = $true)][string]$Line,
         [Parameter(Mandatory = $true)][string]$TableName
     )
+    # if ($global:OutputState -eq [OutputFileState]::DropCreateInsert) {
+    #     if ($Line -match 'SET IDENTITY_INSERT \[.*?\]\.\[.*?\] OFF') {
+    #         $global:OutputState = [OutputFileState]::WaitingSeparator
+    #     }
+    # }
     if ($global:OutputState -eq [OutputFileState]::DropCreateInsert) {
-        if ($Line -match 'SET IDENTITY_INSERT \[.*?\]\.\[.*?\] OFF') {
+        if ($Line -match 'CREATE TABLE') {
             $global:OutputState = [OutputFileState]::WaitingSeparator
         }
     }
     if ($global:OutputState -eq [OutputFileState]::WaitingSeparator) {
-        if ($Line -match 'GO') {
-            $global:OutputState = [OutputFileState]::SeparatorFound
-        }
-    }
-    if ($global:OutputState -eq [OutputFileState]::SeparatorFound) {
-        if (-not ($Line -match 'GO')) {
+        if ($Line -match 'ALTER TABLE') {
             $global:OutputState = [OutputFileState]::Dependencies
         }
     }
+    # if ($global:OutputState -eq [OutputFileState]::SeparatorFound) {
+    #     if (-not ($Line -match 'GO')) {
+    #         $global:OutputState = [OutputFileState]::Dependencies
+    #     }
+    # }
     if ($global:OutputState -ne [OutputFileState]::Dependencies) {
-        $OutputFile = "$($global:DCIPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:DCIPath).sql"
-        Add-Content -Path $OutputFile -Value $Line
-    } else {
-        $OutputFile = "$($global:RefsPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:RefsPath).sql"
-        if (-not ($global:HasDatabase)) {
-            $global:HasDatabase = $true
-            $Line = "USE [SIMA]`r`nGO`r`n$($Line)"
+        if ($null -eq $global:OutputWriter) {
+            $OutputFile = "$($global:DCIPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:DCIPath).sql"
+            $global:OutputWriter = [System.IO.StreamWriter]::new($OutputFile, $false, [System.Text.Encoding]::UTF8)
         }
-        Add-Content -Path $OutputFile -Value $Line
+        $global:OutputWriter.WriteLine($Line)
+    } else {
+        if (-not ($global:IsRefsInitiated)) {
+            $global:IsRefsInitiated = $true
+            $Line = "USE [SIMA]`r`nGO`r`n$($Line)"
+            CloseOutputWriter
+            $OutputFile = "$($global:RefsPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:RefsPath).sql"
+            $global:OutputWriter = [System.IO.StreamWriter]::new($OutputFile, $false, [System.Text.Encoding]::UTF8)
+        }
+        $global:OutputWriter.WriteLine($Line)
     }
 }
 
 function ResetStates {
     $global:CurrentState = [TableSearchStates]::Searching
     $global:OutputState = [OutputFileState]::DropCreateInsert
-    $global:HasDatabase = $false
+    $global:IsRefsInitiated = $false
+    $global:OutputWriter = $null
+}
+
+function CloseOutputWriter {
+    if ($global:OutputWriter -ne $null) {
+        $global:OutputWriter.Close()
+        $global:OutputWriter.Dispose()
+        $global:OutputWriter = $null
+    }
+}
+
+function FinishFileProcessing {
+    CloseOutputWriter
 }
 
 function GenerateTablesOrderedList {
@@ -219,7 +244,7 @@ function GenerateTablesOrderedList {
             $Content = Get-Content -Path $file
             $CurrentTableName = GetTableNameFromFileName -FileName $(Get-Item $file).Name
             $FoundReferece = $false
-            # Write-Host "Processing file for: $CurrentTableName"
+            Write-Host "Processing file for: $CurrentTableName"
             foreach ($Line in $Content) {
                 if ([string]::IsNullOrWhiteSpace($Line)) {
                     continue
@@ -230,6 +255,7 @@ function GenerateTablesOrderedList {
                 }
                 ProcessOutputFileState -Line $Line -TableName $CurrentTableName
             }
+            FinishFileProcessing -CurrentTableName $CurrentTableName
             if (-not $FoundReferece) {
                 AddTableReferenceControl -CurrentTableName $CurrentTableName
             }
@@ -242,6 +268,11 @@ function RunSQLFile {
         [Parameter(Mandatory=$true)][string]$Type,
         [Parameter(Mandatory=$true)][string]$File
     )
+    $ShouldContinue = Read-Host "Should load the file $($File)? (Y/N)"
+    if ($ShouldContinue -ne "Y") {
+        Write-Host "Skipping file $($File)"
+        exit 200
+    }
     $hostname = "127.0.0.1"
     $port = "1444"
     $login = "tulio"
