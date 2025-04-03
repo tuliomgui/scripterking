@@ -184,7 +184,7 @@ function ProcessOutputFileState {
         }
     }
     if ($global:OutputState -eq [OutputFileState]::WaitingSeparator) {
-        if ($Line -match 'ALTER TABLE') {
+        if ($Line.StartsWith('ALTER TABLE')) {
             $global:OutputState = [OutputFileState]::Dependencies
         }
     }
@@ -268,17 +268,18 @@ function RunSQLFile {
         [Parameter(Mandatory=$true)][string]$Type,
         [Parameter(Mandatory=$true)][string]$File
     )
-    $ShouldContinue = Read-Host "Should load the file $($File)? (Y/N)"
-    if ($ShouldContinue -ne "Y") {
-        Write-Host "Skipping file $($File)"
-        exit 200
-    }
-    $hostname = "127.0.0.1"
-    $port = "1444"
-    $login = "tulio"
-    $pass = "12345678"
+    # $ShouldContinue = Read-Host "Should load the file $($File)? (Y/N)"
+    # if ($ShouldContinue -ne "Y") {
+    #     Write-Host "Skipping file $($File)"
+    #     exit 200
+    # }
+    $hostname = "10.100.10.65" #"127.0.0.1"
+    # $port = "1433"
+    # $login = "tulio"
+    # $pass = "12345678"
     Write-Host "Arquivo: $File"
-    sqlcmd -S "$hostname,$port" -U $login -P $pass -i "$File" >> "$($Type)$([System.IO.Path]::DirectorySeparatorChar)${Type}_queries.log"
+    sqlcmd -S $hostname -E -i "$File" >> "${Type}_queries.log"
+    #sqlcmd -S "$hostname,$port" -U $login -P $pass -i "$File" >> "$($Type)$([System.IO.Path]::DirectorySeparatorChar)${Type}_queries.log"
     # if ([string]::IsNullOrEmpty($login)) {
     #     sqlcmd -S $hostname,$port -E -i "$File" >> "${Type}_queries.log"
     # } else {
@@ -289,7 +290,8 @@ function RunSQLFile {
 function ExecuteScripts {
     foreach ($Type in $global:ExecutionOrder) {
         if ($Type -eq $global:DCIPath) {
-            foreach ($Tables in $global:ReferencedTablesList) {
+            for ($i = 0; $i -lt $global:ReferencedTablesList.Count; $i++) {
+                $Tables = $global:ReferencedTablesList[$i]
                 foreach ($Table in $Tables) {
                     $File = ".$([System.IO.Path]::DirectorySeparatorChar)$($global:DCIPath)$([System.IO.Path]::DirectorySeparatorChar)$($Table).$($global:DCIPath).sql"
                     RunSQLFile -Type $Type -File $File
@@ -298,7 +300,8 @@ function ExecuteScripts {
             continue
         }
         if ($Type -eq $global:RefsPath) {
-            foreach ($Tables in $global:ReferencedTablesList.Reverse()) {
+            for ($i = $global:ReferencedTablesList.Count - 1; $i -ge 0; $i--) {
+                $Tables = $global:ReferencedTablesList[$i]
                 foreach ($Table in $Tables) {
                     $File = ".$([System.IO.Path]::DirectorySeparatorChar)$($global:RefsPath)$([System.IO.Path]::DirectorySeparatorChar)$($Table).$($global:RefsPath).sql"
                     RunSQLFile -Type $Type -File $File
