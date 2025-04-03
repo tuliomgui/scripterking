@@ -268,23 +268,32 @@ function RunSQLFile {
         [Parameter(Mandatory=$true)][string]$Type,
         [Parameter(Mandatory=$true)][string]$File
     )
-    # $ShouldContinue = Read-Host "Should load the file $($File)? (Y/N)"
-    # if ($ShouldContinue -ne "Y") {
-    #     Write-Host "Skipping file $($File)"
-    #     exit 200
-    # }
-    $hostname = "10.100.10.65" #"127.0.0.1"
-    # $port = "1433"
+    if (-not (Test-Path -Path $File)) {
+        return
+    }
+
+    Write-Host "Arquivo: $File"
+
+    #################################################
+    #
+    #       EXECUÇÃO LOCAL
+    #
+    #################################################
+
+    # $hostname = "127.0.0.1"
+    # $port = "1444"
     # $login = "tulio"
     # $pass = "12345678"
-    Write-Host "Arquivo: $File"
-    sqlcmd -S $hostname -E -i "$File" >> "${Type}_queries.log"
-    #sqlcmd -S "$hostname,$port" -U $login -P $pass -i "$File" >> "$($Type)$([System.IO.Path]::DirectorySeparatorChar)${Type}_queries.log"
-    # if ([string]::IsNullOrEmpty($login)) {
-    #     sqlcmd -S $hostname,$port -E -i "$File" >> "${Type}_queries.log"
-    # } else {
-    #     sqlcmd -S $hostname,$port -U $login -P $pass -i "$File" >> "${Type}_queries.log"
-    # }
+    # sqlcmd -S "$hostname,$port" -U $login -P $pass -x -i "$File" >> "$($Type)$([System.IO.Path]::DirectorySeparatorChar)${Type}_queries.log"
+
+    #################################################
+    #
+    #       EXECUÇÃO EM HOMOLOGAÇÃO
+    #
+    #################################################
+
+    $hostname = "10.100.10.65"
+    sqlcmd -S $hostname -E -x -i "$File" >> "${Type}_queries.log"
 }
 
 function ExecuteScripts {
