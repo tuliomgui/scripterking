@@ -18,6 +18,7 @@ enum OutputFileState {
 }
 
 $global:OutputWriter = $null
+$global:ShouldWriteFile = $true
 
 $global:DCIPath = "DCI"
 $global:RefsPath = "Refs"
@@ -196,18 +197,31 @@ function ProcessOutputFileState {
     if ($global:OutputState -ne [OutputFileState]::Dependencies) {
         if ($null -eq $global:OutputWriter) {
             $OutputFile = "$($global:DCIPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:DCIPath).sql"
-            $global:OutputWriter = [System.IO.StreamWriter]::new($OutputFile, $false, [System.Text.Encoding]::UTF8)
+            if (Test-Path -Path $OutputFile) {
+                $global:ShouldWriteFile = $false
+            } else {
+                $global:OutputWriter = [System.IO.StreamWriter]::new($OutputFile, $false, [System.Text.Encoding]::UTF8)
+            }
         }
-        $global:OutputWriter.WriteLine($Line)
+        if ($global:ShouldWriteFile) {
+            $global:OutputWriter.WriteLine($Line)
+        }
     } else {
         if (-not ($global:IsRefsInitiated)) {
             $global:IsRefsInitiated = $true
+            $global:ShouldWriteFile = $true
             $Line = "USE [SIMA]`r`nGO`r`n$($Line)"
             CloseOutputWriter
             $OutputFile = "$($global:RefsPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:RefsPath).sql"
-            $global:OutputWriter = [System.IO.StreamWriter]::new($OutputFile, $false, [System.Text.Encoding]::UTF8)
+            if (Test-Path -Path $OutputFile) {
+                $global:ShouldWriteFile = $false
+            } else {
+                $global:OutputWriter = [System.IO.StreamWriter]::new($OutputFile, $false, [System.Text.Encoding]::UTF8)
+            }
         }
-        $global:OutputWriter.WriteLine($Line)
+        if ($global:ShouldWriteFile) {
+            $global:OutputWriter.WriteLine($Line)
+        }
     }
 }
 
@@ -216,6 +230,7 @@ function ResetStates {
     $global:OutputState = [OutputFileState]::DropCreateInsert
     $global:IsRefsInitiated = $false
     $global:OutputWriter = $null
+    $global:ShouldWriteFile = $true
 }
 
 function CloseOutputWriter {
@@ -280,11 +295,11 @@ function RunSQLFile {
     #
     #################################################
 
-    # $hostname = "127.0.0.1"
-    # $port = "1444"
-    # $login = "tulio"
-    # $pass = "12345678"
-    # sqlcmd -S "$hostname,$port" -U $login -P $pass -x -i "$File" >> "$($Type)$([System.IO.Path]::DirectorySeparatorChar)${Type}_queries.log"
+    $hostname = "127.0.0.1"
+    $port = "1444"
+    $login = "tulio"
+    $pass = "12345678"
+    sqlcmd -S "$hostname,$port" -U $login -P $pass -x -i "$File" >> "$($Type)$([System.IO.Path]::DirectorySeparatorChar)${Type}_queries.log"
 
     #################################################
     #
@@ -292,8 +307,8 @@ function RunSQLFile {
     #
     #################################################
 
-    $hostname = "10.100.10.65"
-    sqlcmd -S $hostname -E -x -i "$File" >> "${Type}_queries.log"
+    # $hostname = "10.100.10.65"
+    # sqlcmd -S $hostname -E -x -i "$File" >> "${Type}_queries.log"
 }
 
 function ExecuteScripts {
@@ -377,7 +392,7 @@ function CreateAllFoldersAndMoveFiles {
 }
 
 Write-Host "Running..." -ForegroundColor Green
-CreateAllFoldersAndMoveFiles
+#CreateAllFoldersAndMoveFiles
 $Time = [Diagnostics.Stopwatch]::StartNew()
 GenerateTablesOrderedList -FileList @(GetTableSqlFiles)
 GenerateTablesLevels
