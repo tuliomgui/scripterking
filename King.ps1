@@ -256,11 +256,11 @@ function GenerateTablesOrderedList {
         # Write-Host "Found $($FileList.Count) files."
         foreach ($file in $FileList) {
             ResetStates
-            $Content = Get-Content -Path $file
+            $Reader = [System.IO.StreamReader]::new($file)
             $CurrentTableName = GetTableNameFromFileName -FileName $(Get-Item $file).Name
             $FoundReferece = $false
             Write-Host "Processing file for: $CurrentTableName"
-            foreach ($Line in $Content) {
+            while ($null -ne ($Line = $Reader.ReadLine())) {
                 if ([string]::IsNullOrWhiteSpace($Line)) {
                     continue
                 }
@@ -270,6 +270,7 @@ function GenerateTablesOrderedList {
                 }
                 ProcessOutputFileState -Line $Line -TableName $CurrentTableName
             }
+            $Reader.Close()
             FinishFileProcessing -CurrentTableName $CurrentTableName
             if (-not $FoundReferece) {
                 AddTableReferenceControl -CurrentTableName $CurrentTableName
@@ -392,7 +393,7 @@ function CreateAllFoldersAndMoveFiles {
 }
 
 Write-Host "Running..." -ForegroundColor Green
-#CreateAllFoldersAndMoveFiles
+CreateAllFoldersAndMoveFiles
 $Time = [Diagnostics.Stopwatch]::StartNew()
 GenerateTablesOrderedList -FileList @(GetTableSqlFiles)
 GenerateTablesLevels
