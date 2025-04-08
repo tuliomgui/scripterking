@@ -23,6 +23,7 @@ $global:ShouldWriteFile = $true
 $global:DCIPath = "DCI"
 $global:RefsPath = "Refs"
 $global:IsRefsInitiated = $false
+$global:DatabaseName = $null
 
 $global:ExecutionOrder = @("Schema", $global:DCIPath, $global:RefsPath, "View", "UserDefinedFunction", "StoredProcedure", "Users")
 
@@ -78,6 +79,10 @@ function AddTableReferenceControl {
     if (-not ($global:AllTables -contains $CurrentTableName)) {
         $global:AllTables.Add($CurrentTableName) | Out-Null
     }
+    if ($CurrentTableName -eq $ReferencedTableName) {
+        Write-Host "Current table name is the same as referenced table name. Ignoring $CurrentTableName as a needed reference" -ForegroundColor Red
+        return
+    }
     if ([string]::IsNullOrWhiteSpace($ReferencedTableName)) {
         return
     }
@@ -117,8 +122,24 @@ function GetTableReferenceLevel {
         [Parameter(Mandatory = $true)][Int16]$Level,
         [Parameter(Mandatory = $true)][string]$TableName
     )
+    Write-Host "Table: $TableName, Level: $Level" -ForegroundColor Yellow
     if ($global:TableReferencedByMap.ContainsKey($TableName)) {
         $HighestLevel = $Level
+        $CurrentTable = $TableName
+        # TODO: Reescrever essa parte para não usar recursão, fazer com loop
+        # while ($true) {
+        #     if ($global:TablesReferencedByMap.ContainsKey($CurrentTable)) {
+        #         $CurrentTable = $global:TablesReferencedByMap[$CurrentTable].GetEnumerator() | Select-Object -First 1
+        #         if ($null -eq $CurrentTable) {
+        #             break
+        #         }
+        #         $CurrentTable = $CurrentTable.Current
+        #     } else {
+        #         break
+        #     }
+        # }
+
+        # Essa parte aqui está usando recursão, porém, quando tem muitos dados está estourando a memória
         foreach ($Table in $global:TableReferencedByMap[$TableName]) {
             $NewLevel = GetTableReferenceLevel -Level ($Level + 1) -TableName $Table
             if ($NewLevel -gt $HighestLevel) {
@@ -174,11 +195,9 @@ function ProcessOutputFileState {
         [Parameter(Mandatory = $true)][string]$Line,
         [Parameter(Mandatory = $true)][string]$TableName
     )
-    # if ($global:OutputState -eq [OutputFileState]::DropCreateInsert) {
-    #     if ($Line -match 'SET IDENTITY_INSERT \[.*?\]\.\[.*?\] OFF') {
-    #         $global:OutputState = [OutputFileState]::WaitingSeparator
-    #     }
-    # }
+    if ([string]::IsNullOrWhiteSpace($global:DatabaseName) -and $Line -match 'USE\s+(\[?\w+\]?)') {
+        $global:DatabaseName = $matches[1]
+    }
     if ($global:OutputState -eq [OutputFileState]::DropCreateInsert) {
         if ($Line -match 'CREATE TABLE') {
             $global:OutputState = [OutputFileState]::WaitingSeparator
@@ -189,11 +208,6 @@ function ProcessOutputFileState {
             $global:OutputState = [OutputFileState]::Dependencies
         }
     }
-    # if ($global:OutputState -eq [OutputFileState]::SeparatorFound) {
-    #     if (-not ($Line -match 'GO')) {
-    #         $global:OutputState = [OutputFileState]::Dependencies
-    #     }
-    # }
     if ($global:OutputState -ne [OutputFileState]::Dependencies) {
         if ($null -eq $global:OutputWriter) {
             $OutputFile = "$($global:DCIPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:DCIPath).sql"
@@ -210,7 +224,7 @@ function ProcessOutputFileState {
         if (-not ($global:IsRefsInitiated)) {
             $global:IsRefsInitiated = $true
             $global:ShouldWriteFile = $true
-            $Line = "USE [SIMA]`r`nGO`r`n$($Line)"
+            $Line = "$global:DatabaseName`r`nGO`r`n$($Line)"
             CloseOutputWriter
             $OutputFile = "$($global:RefsPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:RefsPath).sql"
             if (Test-Path -Path $OutputFile) {
@@ -231,6 +245,7 @@ function ResetStates {
     $global:IsRefsInitiated = $false
     $global:OutputWriter = $null
     $global:ShouldWriteFile = $true
+    $global:DatabaseName = $null
 }
 
 function CloseOutputWriter {
