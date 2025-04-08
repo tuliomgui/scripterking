@@ -122,24 +122,9 @@ function GetTableReferenceLevel {
         [Parameter(Mandatory = $true)][Int16]$Level,
         [Parameter(Mandatory = $true)][string]$TableName
     )
-    Write-Host "Table: $TableName, Level: $Level" -ForegroundColor Yellow
+    #Write-Host "Table: $TableName, Level: $Level" -ForegroundColor Yellow
     if ($global:TableReferencedByMap.ContainsKey($TableName)) {
         $HighestLevel = $Level
-        $CurrentTable = $TableName
-        # TODO: Reescrever essa parte para não usar recursão, fazer com loop
-        # while ($true) {
-        #     if ($global:TablesReferencedByMap.ContainsKey($CurrentTable)) {
-        #         $CurrentTable = $global:TablesReferencedByMap[$CurrentTable].GetEnumerator() | Select-Object -First 1
-        #         if ($null -eq $CurrentTable) {
-        #             break
-        #         }
-        #         $CurrentTable = $CurrentTable.Current
-        #     } else {
-        #         break
-        #     }
-        # }
-
-        # Essa parte aqui está usando recursão, porém, quando tem muitos dados está estourando a memória
         foreach ($Table in $global:TableReferencedByMap[$TableName]) {
             $NewLevel = GetTableReferenceLevel -Level ($Level + 1) -TableName $Table
             if ($NewLevel -gt $HighestLevel) {
@@ -224,7 +209,7 @@ function ProcessOutputFileState {
         if (-not ($global:IsRefsInitiated)) {
             $global:IsRefsInitiated = $true
             $global:ShouldWriteFile = $true
-            $Line = "$global:DatabaseName`r`nGO`r`n$($Line)"
+            $Line = "USE $global:DatabaseName`r`nGO`r`n$($Line)"
             CloseOutputWriter
             $OutputFile = "$($global:RefsPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:RefsPath).sql"
             if (Test-Path -Path $OutputFile) {
@@ -415,4 +400,4 @@ GenerateTablesLevels
 PrettyPrintTablesList
 $Time.Stop()
 Write-Host "Execution Time: $([math]::Round($Time.Elapsed.TotalSeconds, 2)) seconds" -ForegroundColor Green
-ExecuteScripts
+#ExecuteScripts
