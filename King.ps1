@@ -208,11 +208,15 @@ function ProcessOutputFileState {
             }
         }
         if ($global:ShouldWriteFile) {
+            if ($global:CurrFileSize -eq 0 -and $global:CurrFileIndex -ne 0) {
+                Write-Host "... Creating chunk $global:CurrFileIndex... " -ForegroundColor Yellow -NoNewline
+            }
             $global:CurrFileSize += [System.Text.Encoding]::UTF8.GetByteCount($Line) + 2  # +2 for CRLF
             if ($global:CurrFileSize -gt $global:ChunckSize) {
                 $global:OutputState = [OutputFileState]::CloseIntermediaryFile
             }
             if ($global:OutputState -eq [OutputFileState]::CloseIntermediaryFile -and $Line.StartsWith('INSERT ')) {
+                #Write-Host "Done! " -ForegroundColor Green
                 CloseIntermediaryOutputFile -TableName $TableName
                 $OutputFile = GetOutputFileName -TableName $TableName -RefsPath $global:DCIPath
                 $global:OutputState = [OutputFileState]::WaitingSeparator
@@ -225,8 +229,8 @@ function ProcessOutputFileState {
         if (-not ($global:IsRefsInitiated)) {
             $global:IsRefsInitiated = $true
             $global:ShouldWriteFile = $true
-            $Line = "USE $global:DatabaseName`r`nGO`r`n$($Line)"
             CloseOutputWriter
+            $Line = "USE $global:DatabaseName`r`nGO`r`n$($Line)"
             $OutputFile = GetOutputFileName -TableName $TableName -RefsPath $global:RefsPath
             if (Test-Path -Path $OutputFile) {
                 $global:ShouldWriteFile = $false
@@ -283,6 +287,9 @@ function ResetStates {
 }
 
 function CloseOutputWriter {
+    if ($global:CurrFileIndex -gt 0) {
+        Write-Host "Done! " -ForegroundColor Green
+    }
     if ($null -ne $global:OutputWriter) {
         $global:OutputWriter.Close()
         $global:OutputWriter.Dispose()
@@ -468,4 +475,4 @@ GenerateTablesLevels
 PrettyPrintTablesList
 $Time.Stop()
 Write-Host "Execution Time: $([math]::Round($Time.Elapsed.TotalSeconds, 2)) seconds" -ForegroundColor Green
-ExecuteScripts
+#ExecuteScripts
