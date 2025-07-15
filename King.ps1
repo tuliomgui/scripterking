@@ -15,10 +15,14 @@ enum OutputFileState {
     WaitingSeparator
     SeparatorFound
     Dependencies
+    CloseIntermediaryFile
 }
 
+$global:ChunckSize = 150MB
 $global:OutputWriter = $null
 $global:ShouldWriteFile = $true
+$global:CurrFileSize = $null
+$global:CurrFileIndex = 0
 
 $global:DCIPath = "DCI"
 $global:RefsPath = "Refs"
@@ -33,6 +37,7 @@ $global:AllTables = [System.Collections.ArrayList]::new()
 $global:ReferencedTablesList = [System.Collections.ArrayList]::new()
 $global:TablesMap = [System.Collections.Hashtable]::new()
 $global:TableReferencedByMap = [System.Collections.Hashtable]::new()
+$global:ChunckedTables = [System.Collections.Hashtable]::new()
 
 function GetTableSqlFiles {
     return Get-ChildItem -Path "." -Recurse -File -Filter "*Table.sql" -ErrorAction SilentlyContinue
@@ -188,14 +193,14 @@ function ProcessOutputFileState {
             $global:OutputState = [OutputFileState]::WaitingSeparator
         }
     }
-    if ($global:OutputState -eq [OutputFileState]::WaitingSeparator) {
+    if ($global:OutputState -eq [OutputFileState]::WaitingSeparator -or $global:OutputState -eq [OutputFileState]::CloseIntermediaryFile) {
         if ($Line.StartsWith('ALTER TABLE')) {
             $global:OutputState = [OutputFileState]::Dependencies
         }
     }
     if ($global:OutputState -ne [OutputFileState]::Dependencies) {
         if ($null -eq $global:OutputWriter) {
-            $OutputFile = "$($global:DCIPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:DCIPath).sql"
+            $OutputFile = GetOutputFileName -TableName $TableName -RefsPath $global:DCIPath
             if (Test-Path -Path $OutputFile) {
                 $global:ShouldWriteFile = $false
             } else {
@@ -203,6 +208,17 @@ function ProcessOutputFileState {
             }
         }
         if ($global:ShouldWriteFile) {
+            $global:CurrFileSize += [System.Text.Encoding]::UTF8.GetByteCount($Line) + 2  # +2 for CRLF
+            if ($global:CurrFileSize -gt $global:ChunckSize) {
+                $global:OutputState = [OutputFileState]::CloseIntermediaryFile
+            }
+            if ($global:OutputState -eq [OutputFileState]::CloseIntermediaryFile -and $Line.StartsWith('INSERT ')) {
+                CloseIntermediaryOutputFile -TableName $TableName
+                $OutputFile = GetOutputFileName -TableName $TableName -RefsPath $global:DCIPath
+                $global:OutputState = [OutputFileState]::WaitingSeparator
+                $global:OutputWriter = [System.IO.StreamWriter]::new($OutputFile, $false, [System.Text.Encoding]::UTF8)
+                StartIntermediaryOutputFile -TableName $TableName
+            }
             $global:OutputWriter.WriteLine($Line)
         }
     } else {
@@ -211,7 +227,7 @@ function ProcessOutputFileState {
             $global:ShouldWriteFile = $true
             $Line = "USE $global:DatabaseName`r`nGO`r`n$($Line)"
             CloseOutputWriter
-            $OutputFile = "$($global:RefsPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName).$($global:RefsPath).sql"
+            $OutputFile = GetOutputFileName -TableName $TableName -RefsPath $global:RefsPath
             if (Test-Path -Path $OutputFile) {
                 $global:ShouldWriteFile = $false
             } else {
@@ -224,17 +240,50 @@ function ProcessOutputFileState {
     }
 }
 
+function StartIntermediaryOutputFile {
+    param (
+        [Parameter(Mandatory = $true)][string]$TableName
+    )
+    $global:OutputWriter.WriteLine("USE $global:DatabaseName`r`nGO")
+    $global:OutputWriter.WriteLine("SET IDENTITY_INSERT [dbo].[$TableName] ON")
+}
+
+function CloseIntermediaryOutputFile {
+    param (
+        [Parameter(Mandatory = $true)][string]$TableName
+    )
+    $global:OutputWriter.WriteLine("SET IDENTITY_INSERT [dbo].[$TableName] OFF")
+    $global:OutputWriter.WriteLine("GO")
+    CloseOutputWriter
+    $global:CurrFileSize = 0
+}
+
+function GetOutputFileName {
+    param (
+        [Parameter(Mandatory = $true)][string]$TableName,
+        [Parameter(Mandatory = $true)][string]$RefsPath
+    )
+    $OutputFile = "$($RefsPath)$([System.IO.Path]::DirectorySeparatorChar)$($TableName)."
+    if ($global:ChunckedTables.ContainsKey($TableName) -and $RefsPath -eq $global:DCIPath) {
+        $global:CurrFileIndex++
+        $OutputFile += "$($global:CurrFileIndex)."
+    }
+    return $OutputFile + "$($RefsPath).sql"
+}
+
 function ResetStates {
     $global:CurrentState = [TableSearchStates]::Searching
     $global:OutputState = [OutputFileState]::DropCreateInsert
     $global:IsRefsInitiated = $false
     $global:OutputWriter = $null
     $global:ShouldWriteFile = $true
+    $global:CurrFileSize = 0
+    $global:CurrFileIndex = 0
     $global:DatabaseName = $null
 }
 
 function CloseOutputWriter {
-    if ($global:OutputWriter -ne $null) {
+    if ($null -ne $global:OutputWriter) {
         $global:OutputWriter.Close()
         $global:OutputWriter.Dispose()
         $global:OutputWriter = $null
@@ -253,13 +302,22 @@ function GenerateTablesOrderedList {
         Write-Host "No files found."
     }
     else {
-        # Write-Host "Found $($FileList.Count) files."
         foreach ($file in $FileList) {
             ResetStates
             $Reader = [System.IO.StreamReader]::new($file)
+            $FileSize = $Reader.BaseStream.Length
+            $ChunckLength = 0
             $CurrentTableName = GetTableNameFromFileName -FileName $(Get-Item $file).Name
+            if ($FileSize -gt $global:ChunckSize) {
+                $ChunckLength = [math]::Round($FileSize / $global:ChunckSize, 0)
+                $global:ChunckedTables.Add($CurrentTableName, $ChunckLength) | Out-Null
+            }
             $FoundReferece = $false
-            Write-Host "Processing file for: $CurrentTableName"
+            if ($ChunckLength -gt 0) {
+                Write-Host "Processing file for: $CurrentTableName. File is too big, splitting into parts of $([math]::Round($global:ChunckSize / (1024*1024), 0))MB." -ForegroundColor Yellow
+            } else {
+                Write-Host "Processing file for: $CurrentTableName"
+            }
             while ($null -ne ($Line = $Reader.ReadLine())) {
                 if ([string]::IsNullOrWhiteSpace($Line)) {
                     continue
@@ -296,11 +354,11 @@ function RunSQLFile {
     #
     #################################################
 
-    $hostname = "127.0.0.1"
-    $port = "1444"
-    $login = "tulio"
-    $pass = "12345678"
-    sqlcmd -S "$hostname,$port" -U $login -P $pass -x -i "$File" >> "$($Type)$([System.IO.Path]::DirectorySeparatorChar)${Type}_queries.log"
+    # $hostname = "127.0.0.1"
+    # $port = "1444"
+    # $login = "tulio"
+    # $pass = "12345678"
+    # sqlcmd -S "$hostname,$port" -U $login -P $pass -x -i "$File" >> "$($Type)$([System.IO.Path]::DirectorySeparatorChar)${Type}_queries.log"
 
     #################################################
     #
@@ -308,8 +366,8 @@ function RunSQLFile {
     #
     #################################################
 
-    # $hostname = "10.100.10.65"
-    # sqlcmd -S $hostname -E -x -i "$File" >> "${Type}_queries.log"
+    $hostname = "10.100.10.65"
+    sqlcmd -S $hostname -E -x -i "$File" >> "${Type}_queries.log"
 }
 
 function ExecuteScripts {
@@ -318,8 +376,18 @@ function ExecuteScripts {
             for ($i = 0; $i -lt $global:ReferencedTablesList.Count; $i++) {
                 $Tables = $global:ReferencedTablesList[$i]
                 foreach ($Table in $Tables) {
-                    $File = ".$([System.IO.Path]::DirectorySeparatorChar)$($global:DCIPath)$([System.IO.Path]::DirectorySeparatorChar)$($Table).$($global:DCIPath).sql"
-                    RunSQLFile -Type $Type -File $File
+                    if ($global:ChunckedTables.ContainsKey($Table)) {
+                        for ($j = 1; $j -le $global:ChunckedTables[$Table]; $j++) {
+                            $File = ".$([System.IO.Path]::DirectorySeparatorChar)$($global:DCIPath)$([System.IO.Path]::DirectorySeparatorChar)$($Table).$j.$($global:DCIPath).sql"
+                            if (-not (Test-Path -Path $File)) {
+                                break
+                            }
+                            RunSQLFile -Type $Type -File $File
+                        }
+                    } else {
+                        $File = ".$([System.IO.Path]::DirectorySeparatorChar)$($global:DCIPath)$([System.IO.Path]::DirectorySeparatorChar)$($Table).$($global:DCIPath).sql"
+                        RunSQLFile -Type $Type -File $File
+                    }
                 }
             }
             continue
@@ -329,7 +397,7 @@ function ExecuteScripts {
                 $Tables = $global:ReferencedTablesList[$i]
                 foreach ($Table in $Tables) {
                     $File = ".$([System.IO.Path]::DirectorySeparatorChar)$($global:RefsPath)$([System.IO.Path]::DirectorySeparatorChar)$($Table).$($global:RefsPath).sql"
-                    RunSQLFile -Type $Type -File $File
+                    #RunSQLFile -Type $Type -File $File
                 }
             }
             continue
@@ -400,4 +468,4 @@ GenerateTablesLevels
 PrettyPrintTablesList
 $Time.Stop()
 Write-Host "Execution Time: $([math]::Round($Time.Elapsed.TotalSeconds, 2)) seconds" -ForegroundColor Green
-#ExecuteScripts
+ExecuteScripts
