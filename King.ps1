@@ -1,3 +1,11 @@
+# Script parameters
+param(
+    [string]$Hostname = "",
+    [string]$Port = "",
+    [string]$Login = "",
+    [string]$Password = ""
+)
+
 # Ensure HashSet is available
 Add-Type -TypeDefinition @"
 using System.Collections.Generic;
@@ -187,19 +195,23 @@ function ProcessOutputFileState {
         [Parameter(Mandatory = $true)][string]$Line,
         [Parameter(Mandatory = $true)][string]$TableName
     )
+    # Salva o nome do banco de dados para uso posterior
     if ([string]::IsNullOrWhiteSpace($global:DatabaseName) -and $Line -match 'USE\s+(\[?\w+\]?)') {
         $global:DatabaseName = $matches[1]
     }
+    # Vai lendo o arquivo atual até achar a instrução 'CREATE TABLE', quando achar muda para o próximo estado
     if ($global:OutputState -eq [OutputFileState]::DropCreateInsert) {
         if ($Line -match 'CREATE TABLE') {
             $global:OutputState = [OutputFileState]::WaitingSeparator
         }
     }
+    # Vai lendo o arquivo atual até achar a instrução 'ALTER TABLE', quando achar é o ponto que vai começar a escrever as referências (Foreign Keys, Index e etc)
     if ($global:OutputState -eq [OutputFileState]::WaitingSeparator -or $global:OutputState -eq [OutputFileState]::CloseIntermediaryFile) {
         if ($Line.StartsWith('ALTER TABLE')) {
             $global:OutputState = [OutputFileState]::Dependencies
         }
     }
+    # Se o estado atual não for Dependencies então vai escrever os dados no arquivo DCI
     if ($global:OutputState -ne [OutputFileState]::Dependencies) {
         if ($null -eq $global:OutputWriter) {
             $OutputFile = GetOutputFileName -TableName $TableName -RefsPath $global:DCIPath
@@ -218,7 +230,6 @@ function ProcessOutputFileState {
                 $global:OutputState = [OutputFileState]::CloseIntermediaryFile
             }
             if ($global:OutputState -eq [OutputFileState]::CloseIntermediaryFile -and $Line.StartsWith('INSERT ')) {
-                #Write-Host "Done! " -ForegroundColor Green
                 CloseIntermediaryOutputFile -TableName $TableName
                 $OutputFile = GetOutputFileName -TableName $TableName -RefsPath $global:DCIPath
                 $global:OutputState = [OutputFileState]::WaitingSeparator
@@ -227,7 +238,9 @@ function ProcessOutputFileState {
             }
             $global:OutputWriter.WriteLine($Line)
         }
-    } else {
+    }
+    # Se o estado atual for Dependencies então vai escrever as referências no arquivo Refs
+    else {
         if (-not ($global:IsRefsInitiated)) {
             $global:IsRefsInitiated = $true
             $global:ShouldWriteFile = $true
@@ -314,6 +327,8 @@ function GenerateTablesOrderedList {
         foreach ($file in $FileList) {
             ResetStates
             $Reader = [System.IO.StreamReader]::new($file)
+
+            # Faz a verificação se o arquivo será dividido em partes
             $FileSize = $Reader.BaseStream.Length
             $ChunckLength = 0
             $CurrentTableName = GetTableNameFromFileName -FileName $(Get-Item $file).Name
@@ -321,6 +336,8 @@ function GenerateTablesOrderedList {
                 $ChunckLength = [math]::Round($FileSize / $global:ChunckSize, 0)
                 $global:ChunckedTables.Add($CurrentTableName, $ChunckLength) | Out-Null
             }
+
+            # Inicia a organização do arquivo
             $FoundReferece = $false
             if ($ChunckLength -gt 0) {
                 Write-Host "Processing file for: $CurrentTableName. File is too big, splitting into parts of $([math]::Round($global:ChunckSize / (1024*1024), 0))MB." -ForegroundColor Yellow
@@ -362,27 +379,6 @@ function RunSQLFile {
     } else {
         sqlcmd -S "$global:hostname,$global:port" -U $global:login -P $global:pass -x -i "$File" >> "$($Type)$([System.IO.Path]::DirectorySeparatorChar)${Type}_queries.log"
     }
-
-    #################################################
-    #
-    #       EXECUÇÃO LOCAL
-    #
-    #################################################
-
-    # $hostname = "127.0.0.1"
-    # $port = "1444"
-    # $login = "tulio"
-    # $pass = "12345678"
-    # sqlcmd -S "$hostname,$port" -U $login -P $pass -x -i "$File" >> "$($Type)$([System.IO.Path]::DirectorySeparatorChar)${Type}_queries.log"
-
-    #################################################
-    #
-    #       EXECUÇÃO EM HOMOLOGAÇÃO
-    #
-    #################################################
-
-    # $hostname = "10.100.10.65"
-    # sqlcmd -S $hostname -E -x -i "$File" >> "${Type}_queries.log"
 }
 
 function ExecuteScripts {
@@ -474,38 +470,87 @@ function CreateAllFoldersAndMoveFiles {
     }
 }
 
-# Main script execution
-Write-Host "Starting ScripterKing..." -ForegroundColor Cyan
-$global:hostname = Read-Host "... Server IP address/hostname (default is 127.0.0.1)"
-if ([string]::IsNullOrWhiteSpace($global:hostname)) {
-    $global:hostname = "127.0.0.1"
-} else {
-    # Validate if hostname is a valid IP address
-    if (-not ($global:hostname -match '^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')) {
+function ValidateHostname {
+    param (
+        [Parameter(Mandatory = $true)][string]$Hostname
+    )
+    if ([string]::IsNullOrWhiteSpace($Hostname)) {
+        Write-Host "Hostname cannot be empty." -ForegroundColor Red
+        exit 1
+    }
+    # Valida se o hostname é um endereço IP válido
+    if (-not ($Hostname -match '^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')) {
         Write-Host "Invalid IP address format. Please enter a valid IP address." -ForegroundColor Red
         exit 1
     }
 }
-$global:port = Read-Host "... Server port (default is 1433)"
-if ([string]::IsNullOrWhiteSpace($global:port)) {
-    $global:port = "1433"
-}
-# Validate if port is a valid number
-if (-not ($global:port -match '^\d+$') -or [int]$global:port -lt 1 -or [int]$global:port -gt 65535) {
-    Write-Host "Invalid port number. Please enter a valid port number between 1 and 65535." -ForegroundColor Red
-    exit 1
-}
-$global:login = Read-Host "... Database login (leave blank for Windows Authentication)"
-if ([string]::IsNullOrWhiteSpace($global:login)) {
-    Write-Host "... Using Windows Authentication." -ForegroundColor Yellow
-    $global:login = ""
-    $global:pass = ""
-} else {
-    $global:pass = Read-Host "... Database password"
-    if ([string]::IsNullOrWhiteSpace($global:pass)) {
-        Write-Host "... Password cannot be empty." -ForegroundColor Red
+
+function ValidatePort {
+    param (
+        [Parameter(Mandatory = $true)][string]$Port
+    )
+    # Valida se a porta informada é um número válido
+    if (-not ($Port -match '^\d+$') -or [int]$Port -lt 1 -or [int]$Port -gt 65535) {
+        Write-Host "Invalid port number. Please enter a valid port number between 1 and 65535." -ForegroundColor Red
         exit 1
     }
+}
+
+function ValidatePassword {
+    param (
+        [Parameter(Mandatory = $true)][string]$Password
+    )
+    if ([string]::IsNullOrWhiteSpace($Password)) {
+        Write-Host "Password cannot be empty." -ForegroundColor Red
+        exit 1
+    }
+}
+
+function GetLoginCredentials {
+    # Pega os dados do hostname de conexão
+    $global:hostname = Read-Host "... Server IP address/hostname (default is 127.0.0.1)"
+    if ([string]::IsNullOrWhiteSpace($global:hostname)) {
+        $global:hostname = "127.0.0.1"
+    }
+    ValidateHostname -Hostname $global:hostname
+
+    # Pega os dados da porta de conexão
+    $global:port = Read-Host "... Server port (default is 1433)"
+    if ([string]::IsNullOrWhiteSpace($global:port)) {
+        $global:port = "1433"
+    }
+    ValidatePort -Port $global:port
+
+    # Pega os dados de login e senha do banco de dados
+    $global:login = Read-Host "... Database login (leave blank for Windows Authentication)"
+    if ([string]::IsNullOrWhiteSpace($global:login)) {
+        Write-Host "... Using Windows Authentication." -ForegroundColor Yellow
+        $global:login = ""
+        $global:pass = ""
+    } else {
+        $global:pass = Read-Host "... Database password"
+        ValidatePassword -Password $global:pass
+    }
+}
+
+# Código de execução do script
+Write-Host "Starting ScripterKing..." -ForegroundColor Cyan
+
+$global:hostname = $Hostname
+
+# Verifica se o hostname foi fornecido como parâmetro
+if (-not [string]::IsNullOrWhiteSpace($global:hostname)) {
+    # Se foi fornecido, pega as outras variáveis
+    $global:port = $Port
+    $global:login = $Login
+    $global:pass = $Password
+    ValidateHostname -Hostname $global:hostname
+    ValidatePort -Port $global:port
+    if (-not [string]::IsNullOrWhiteSpace($global:login)) {
+        ValidatePassword -Password $global:pass
+    }
+} else {
+    GetLoginCredentials
 }
 
 # Remove espaços em branco desnecessários
@@ -522,6 +567,7 @@ GenerateTablesOrderedList -FileList @(GetTableSqlFiles)
 GenerateTablesLevels
 PrettyPrintTablesList
 # $Time.Stop()
+Write-Host ""
 Write-Host "Schema reading time: $([math]::Round($Time.Elapsed.TotalSeconds, 2)) seconds" -ForegroundColor Green
 Write-Host ""
 ExecuteScripts
