@@ -404,7 +404,7 @@ function ExecuteScripts {
                 $Tables = $global:ReferencedTablesList[$i]
                 foreach ($Table in $Tables) {
                     $File = ".$([System.IO.Path]::DirectorySeparatorChar)$($global:RefsPath)$([System.IO.Path]::DirectorySeparatorChar)$($Table).$($global:RefsPath).sql"
-                    #RunSQLFile -Type $Type -File $File
+                    RunSQLFile -Type $Type -File $File
                 }
             }
             continue
@@ -475,4 +475,4 @@ GenerateTablesLevels
 PrettyPrintTablesList
 $Time.Stop()
 Write-Host "Execution Time: $([math]::Round($Time.Elapsed.TotalSeconds, 2)) seconds" -ForegroundColor Green
-#ExecuteScripts
+ExecuteScripts
