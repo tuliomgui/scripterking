@@ -18,6 +18,11 @@ enum OutputFileState {
     CloseIntermediaryFile
 }
 
+$global:hostname = ""
+$global:port = ""
+$global:login = ""
+$global:pass = ""
+
 $global:ChunckSize = 150MB
 $global:OutputWriter = $null
 $global:ShouldWriteFile = $true
@@ -48,7 +53,6 @@ function SearchForeignKey {
         [Parameter(Mandatory = $true)][string]$CurrentLine
     )
     if ($CurrentLine -match 'FOREIGN KEY') {
-        # Write-Host "[FK] Line content: $CurrentLine"
         $global:CurrentState = [TableSearchStates]::FKFound
     }
 }
@@ -58,7 +62,6 @@ function SearchReference {
         [Parameter(Mandatory = $true)][string]$CurrentLine
     )
     if ($CurrentLine -match 'REFERENCES') {
-        # Write-Host "[REF] Line content: $CurrentLine"
         $global:CurrentState = [TableSearchStates]::ReferenceFound
     }
 }
@@ -127,7 +130,6 @@ function GetTableReferenceLevel {
         [Parameter(Mandatory = $true)][Int16]$Level,
         [Parameter(Mandatory = $true)][string]$TableName
     )
-    #Write-Host "Table: $TableName, Level: $Level" -ForegroundColor Yellow
     if ($global:TableReferencedByMap.ContainsKey($TableName)) {
         $HighestLevel = $Level
         foreach ($Table in $global:TableReferencedByMap[$TableName]) {
@@ -353,7 +355,13 @@ function RunSQLFile {
         return
     }
 
-    Write-Host "Arquivo: $File"
+    Write-Host "Executing file: $File"
+
+    if ("" -eq $global:login -or "" -eq $global:pass) {
+        sqlcmd -S "$global:hostname,$global:port" -E -x -i "$File" >> "${Type}_queries.log"
+    } else {
+        sqlcmd -S "$global:hostname,$global:port" -U $global:login -P $global:pass -x -i "$File" >> "$($Type)$([System.IO.Path]::DirectorySeparatorChar)${Type}_queries.log"
+    }
 
     #################################################
     #
@@ -373,8 +381,8 @@ function RunSQLFile {
     #
     #################################################
 
-    $hostname = "10.100.10.65"
-    sqlcmd -S $hostname -E -x -i "$File" >> "${Type}_queries.log"
+    # $hostname = "10.100.10.65"
+    # sqlcmd -S $hostname -E -x -i "$File" >> "${Type}_queries.log"
 }
 
 function ExecuteScripts {
@@ -455,7 +463,6 @@ function MoveFilesToFolders {
 function GenerateTablesLevels {
     foreach ($Table in $global:AllTables) {
         $CurrentTableLevel = GetTableReferenceLevel -Level 0 -TableName $Table
-        # Write-Host "Table: $Table, Level: $CurrentTableLevel"
         AddReferenceOnLevel -TableName $Table -Level $CurrentTableLevel
     }
 }
@@ -467,12 +474,55 @@ function CreateAllFoldersAndMoveFiles {
     }
 }
 
+# Main script execution
+Write-Host "Starting ScripterKing..." -ForegroundColor Cyan
+$global:hostname = Read-Host "... Server IP address/hostname (default is 127.0.0.1)"
+if ([string]::IsNullOrWhiteSpace($global:hostname)) {
+    $global:hostname = "127.0.0.1"
+} else {
+    # Validate if hostname is a valid IP address
+    if (-not ($global:hostname -match '^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')) {
+        Write-Host "Invalid IP address format. Please enter a valid IP address." -ForegroundColor Red
+        exit 1
+    }
+}
+$global:port = Read-Host "... Server port (default is 1433)"
+if ([string]::IsNullOrWhiteSpace($global:port)) {
+    $global:port = "1433"
+}
+# Validate if port is a valid number
+if (-not ($global:port -match '^\d+$') -or [int]$global:port -lt 1 -or [int]$global:port -gt 65535) {
+    Write-Host "Invalid port number. Please enter a valid port number between 1 and 65535." -ForegroundColor Red
+    exit 1
+}
+$global:login = Read-Host "... Database login (leave blank for Windows Authentication)"
+if ([string]::IsNullOrWhiteSpace($global:login)) {
+    Write-Host "... Using Windows Authentication." -ForegroundColor Yellow
+    $global:login = ""
+    $global:pass = ""
+} else {
+    $global:pass = Read-Host "... Database password"
+    if ([string]::IsNullOrWhiteSpace($global:pass)) {
+        Write-Host "... Password cannot be empty." -ForegroundColor Red
+        exit 1
+    }
+}
+
+# Remove espaços em branco desnecessários
+$global:hostname = $global:hostname.Trim()
+$global:port = $global:port.Trim()
+$global:login = $global:login.Trim()
+$global:pass = $global:pass.Trim()
+
+Write-Host ""
 Write-Host "Running..." -ForegroundColor Green
 CreateAllFoldersAndMoveFiles
 $Time = [Diagnostics.Stopwatch]::StartNew()
 GenerateTablesOrderedList -FileList @(GetTableSqlFiles)
 GenerateTablesLevels
 PrettyPrintTablesList
-$Time.Stop()
-Write-Host "Execution Time: $([math]::Round($Time.Elapsed.TotalSeconds, 2)) seconds" -ForegroundColor Green
+# $Time.Stop()
+Write-Host "Schema reading time: $([math]::Round($Time.Elapsed.TotalSeconds, 2)) seconds" -ForegroundColor Green
+Write-Host ""
 ExecuteScripts
+Write-Host "Total execution time: $([math]::Round($Time.Elapsed.TotalSeconds, 2)) seconds" -ForegroundColor Green
